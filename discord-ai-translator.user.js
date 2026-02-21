@@ -1,5 +1,5 @@
 ﻿// ==UserScript==
-// @name         Discord AI Floating Translator & Replier
+// @name         Discord AI 自动翻译及回复助手
 // @namespace    https://local.discord.ai.tools
 // @version      0.1.0
 // @description  Floating Discord translator/replier with context, cache, and OpenAI-compatible API support.
@@ -1029,22 +1029,121 @@
       return;
     }
 
-    const editor = document.querySelector('div[role="textbox"][data-slate-editor="true"]');
+    const editor = findComposerEditor();
     if (!editor) {
       setStatus('未找到 Discord 输入框。', true);
       return;
     }
 
-    editor.focus();
-
     try {
-      document.execCommand('selectAll', false);
-      document.execCommand('insertText', false, text);
-      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-      setStatus('回复已写入输入框。');
+      editor.focus();
+      selectEditorContents(editor);
+
+      let inserted = tryPasteIntoEditor(editor, text);
+      if (!inserted) {
+        inserted = tryExecInsertText(editor, text);
+      }
+
+      if (!inserted && !editorContainsText(editor, text)) {
+        throw new Error('写入失败');
+      }
+
+      setStatus('回复已写入输入框，可直接编辑和发送。');
     } catch (error) {
       setStatus('写入失败，请手动复制输出框内容。', true);
     }
+  }
+
+  function findComposerEditor() {
+    const selectors = [
+      'form div[role="textbox"][data-slate-editor="true"]',
+      'div[class*="channelTextArea"] div[role="textbox"][data-slate-editor="true"]',
+      'div[role="textbox"][data-slate-editor="true"]',
+    ];
+
+    const unique = new Set();
+    const candidates = [];
+
+    for (const selector of selectors) {
+      const nodes = document.querySelectorAll(selector);
+      for (const node of nodes) {
+        if (unique.has(node)) {
+          continue;
+        }
+        unique.add(node);
+        candidates.push(node);
+      }
+    }
+
+    const visible = candidates.find((node) => isElementVisible(node));
+    return visible || candidates[0] || null;
+  }
+
+  function isElementVisible(node) {
+    if (!(node instanceof HTMLElement)) {
+      return false;
+    }
+
+    const style = window.getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden') {
+      return false;
+    }
+
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function selectEditorContents(editor) {
+    const selection = window.getSelection();
+    if (!selection) {
+      return;
+    }
+
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function tryPasteIntoEditor(editor, text) {
+    try {
+      if (typeof DataTransfer === 'undefined' || typeof ClipboardEvent === 'undefined') {
+        return false;
+      }
+
+      const dataTransfer = new DataTransfer();
+      dataTransfer.setData('text/plain', text);
+
+      const pasteEvent = new ClipboardEvent('paste', {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: dataTransfer,
+      });
+
+      editor.dispatchEvent(pasteEvent);
+      return editorContainsText(editor, text);
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function tryExecInsertText(editor, text) {
+    if (!document.queryCommandSupported || !document.queryCommandSupported('insertText')) {
+      return false;
+    }
+
+    const inserted = document.execCommand('insertText', false, text);
+    return Boolean(inserted) || editorContainsText(editor, text);
+  }
+
+  function editorContainsText(editor, text) {
+    const target = sanitizeText(text);
+    if (!target) {
+      return false;
+    }
+
+    const current = sanitizeText(editor.innerText || editor.textContent || '');
+    return current.includes(target);
   }
 
   function makeDraggable(panel, handle) {

@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         Discord AI 自动翻译及回复助手
 // @namespace    https://local.discord.ai.tools
-// @version      0.1.0
+// @version      0.1.6
 // @description  Floating Discord translator/replier with context, cache, and OpenAI-compatible API support.
 // @author       You
 // @match        https://discord.com/channels/*
@@ -38,6 +38,54 @@
     },
   };
 
+  const REPLY_PROMPT_PRESETS = [
+    {
+      id: 'random',
+      label: '随机风格（每次生成变化）',
+      instruction: '',
+    },
+    {
+      id: 'friendly_brief',
+      label: '友好简短',
+      instruction: 'Friendly and casual tone. Keep it short: 1-2 concise sentences.',
+    },
+    {
+      id: 'warm_supportive',
+      label: '温暖支持',
+      instruction: 'Empathetic and supportive tone. Acknowledge feelings before giving suggestion.',
+    },
+    {
+      id: 'playful_light',
+      label: '轻松俏皮',
+      instruction: 'Light and playful tone with mild humor. Keep it natural, not exaggerated.',
+    },
+    {
+      id: 'professional_clear',
+      label: '专业清晰',
+      instruction: 'Calm professional tone. Clear wording, polite, and to the point.',
+    },
+    {
+      id: 'curious_followup',
+      label: '追问引导',
+      instruction: 'Use a curious tone and end with one short follow-up question.',
+    },
+    {
+      id: 'action_oriented',
+      label: '行动建议',
+      instruction: 'Give practical next-step advice with one concrete suggestion.',
+    },
+    {
+      id: 'confident_direct',
+      label: '自信直接',
+      instruction: 'Direct and confident tone. No fluff, no overexplaining.',
+    },
+    {
+      id: 'thoughtful_detail',
+      label: '细节走心',
+      instruction: 'Thoughtful tone. Reference one concrete detail from context to avoid generic wording.',
+    },
+  ];
+
   const DEFAULT_SETTINGS = {
     enabled: true,
     autoTranslate: true,
@@ -50,6 +98,8 @@
     temperature: 0.2,
     requestIntervalMs: 900,
     maxCacheEntries: 1000,
+    replyPresetId: 'random',
+    replyExtraInstruction: '',
     systemPromptTranslate:
       'You are a precise conversation translator. Use context to disambiguate meaning, keep names/mentions/emoji, and return only translated message text. Do not include speaker names, labels, or bracket tags like [name].',
     systemPromptReply:
@@ -63,6 +113,7 @@
   let lastRequestAt = 0;
   let cacheSaveTimer = null;
   let lastLocation = window.location.href;
+  let lastReplyPresetId = '';
 
   const pendingTranslationKeys = new Set();
 
@@ -357,6 +408,13 @@
         </div>
 
         <div class="tm-field">
+          <label for="tm-reply-preset">预设提示词</label>
+          <select id="tm-reply-preset">
+            ${renderReplyPresetOptions()}
+          </select>
+        </div>
+
+        <div class="tm-field">
           <label for="tm-reply-input">回复要求（可选）</label>
           <textarea id="tm-reply-input" placeholder="例如：语气友好、简短一点"></textarea>
         </div>
@@ -392,6 +450,7 @@
       apiKey: panel.querySelector('#tm-key'),
       temperature: panel.querySelector('#tm-temperature'),
       requestIntervalMs: panel.querySelector('#tm-interval'),
+      replyPreset: panel.querySelector('#tm-reply-preset'),
     };
 
     makeDraggable(panel, panel.querySelector('.tm-header'));
@@ -468,6 +527,8 @@
     ui.form.apiKey.value = settings.apiKey || '';
     ui.form.temperature.value = String(settings.temperature);
     ui.form.requestIntervalMs.value = String(settings.requestIntervalMs);
+    ui.form.replyPreset.value = settings.replyPresetId || 'random';
+    ui.replyInput.value = settings.replyExtraInstruction || '';
   }
 
   function syncSettingsFromForm() {
@@ -481,6 +542,8 @@
     settings.apiKey = ui.form.apiKey.value.trim();
     settings.temperature = clampNumber(ui.form.temperature.value, 0, 2, DEFAULT_SETTINGS.temperature);
     settings.requestIntervalMs = clampNumber(ui.form.requestIntervalMs.value, 100, 5000, DEFAULT_SETTINGS.requestIntervalMs);
+    settings.replyPresetId = ui.form.replyPreset.value || 'random';
+    settings.replyExtraInstruction = sanitizeText(ui.replyInput.value || '');
 
     cache = trimCacheToLimit(cache, settings.maxCacheEntries);
     persistCacheSoon();
@@ -857,11 +920,17 @@
         return;
       }
 
-      const instruction = sanitizeText(ui.replyInput.value || '');
+      const instruction = sanitizeText(settings.replyExtraInstruction || ui.replyInput.value || '');
+      const preset = resolveReplyPreset(settings.replyPresetId);
       const contextText = context.map((msg, idx) => `${idx + 1}. [${msg.author}] ${msg.text}`).join('\n');
+      const variationToken = Math.random().toString(36).slice(2, 8);
 
       const userPrompt = [
         'Generate one Discord reply from this context.',
+        `Style preset: ${preset.label}`,
+        `Style guidance: ${preset.instruction}`,
+        'Avoid repetitive templates and vary wording/sentence openings.',
+        `Variation token: ${variationToken} (do not output this token).`,
         'Context:',
         contextText,
         instruction ? `Extra instruction: ${instruction}` : '',
@@ -884,10 +953,41 @@
       ]);
 
       ui.replyOutput.value = sanitizeText(reply);
-      setStatus('回复已生成。');
+      setStatus(`回复已生成（${preset.label}）。`);
     } catch (error) {
       setStatus(`生成回复失败：${error.message}`, true);
     }
+  }
+
+  function renderReplyPresetOptions() {
+    return REPLY_PROMPT_PRESETS.map((preset) => `<option value="${preset.id}">${preset.label}</option>`).join('');
+  }
+
+  function resolveReplyPreset(presetId) {
+    const pool = REPLY_PROMPT_PRESETS.filter((preset) => preset.id !== 'random');
+    const fallback = pool[0] || {
+      id: 'fallback',
+      label: '默认',
+      instruction: 'Write a natural Discord reply aligned with the context.',
+    };
+    const normalizedId = String(presetId || 'random').trim().toLowerCase();
+
+    if (normalizedId === 'random') {
+      let candidates = pool;
+      if (lastReplyPresetId) {
+        const withoutLast = pool.filter((preset) => preset.id !== lastReplyPresetId);
+        if (withoutLast.length) {
+          candidates = withoutLast;
+        }
+      }
+      const picked = candidates.length ? candidates[Math.floor(Math.random() * candidates.length)] : fallback;
+      lastReplyPresetId = picked.id;
+      return picked;
+    }
+
+    const fixed = pool.find((preset) => preset.id === normalizedId) || fallback;
+    lastReplyPresetId = fixed.id;
+    return fixed;
   }
 
   async function requestChatCompletion(messages) {
